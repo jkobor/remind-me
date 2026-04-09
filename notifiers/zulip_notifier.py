@@ -1,6 +1,6 @@
 import os
 
-_REQUIRED = ("ZULIP_EMAIL", "ZULIP_API_KEY", "ZULIP_SITE", "ZULIP_STREAM")
+_REQUIRED = ("ZULIP_EMAIL", "ZULIP_API_KEY", "ZULIP_SITE", "ZULIP_TO")
 
 
 def is_configured() -> bool:
@@ -11,7 +11,7 @@ def send(task: str):
     if not is_configured():
         raise RuntimeError(
             "Zulip is not configured. Set ZULIP_EMAIL, ZULIP_API_KEY, "
-            "ZULIP_SITE, and ZULIP_STREAM environment variables."
+            "ZULIP_SITE, and ZULIP_TO environment variables."
         )
 
     import zulip  # deferred so missing package gives a clear error at call time
@@ -22,9 +22,8 @@ def send(task: str):
         site=os.environ["ZULIP_SITE"],
     )
     result = client.send_message({
-        "type": "stream",
-        "to": os.environ["ZULIP_STREAM"],
-        "topic": os.environ.get("ZULIP_TOPIC", "Reminders"),
+        "type": "direct",
+        "to": [os.environ["ZULIP_TO"]],
         "content": f":alarm_clock: **Reminder:** {task}",
     })
     if result.get("result") != "success":
