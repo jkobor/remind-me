@@ -1,13 +1,13 @@
 import atexit
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import dateparser
 from apscheduler.schedulers.background import BackgroundScheduler
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from flask import Flask, flash, redirect, render_template, request, url_for
-from flask import jsonify
 
 import db
 from notifiers import zulip_notifier
@@ -24,12 +24,35 @@ logging.basicConfig(level=logging.INFO)
 # Background sweep
 # ---------------------------------------------------------------------------
 
+_RECURRENCE_DELTAS = {
+    "daily":   lambda dt: dt + timedelta(days=1),
+    "weekly":  lambda dt: dt + timedelta(weeks=1),
+    "monthly": lambda dt: dt + relativedelta(months=1),
+}
+
+RECURRENCE_OPTIONS = [
+    ("none",    "Once"),
+    ("daily",   "Daily"),
+    ("weekly",  "Weekly"),
+    ("monthly", "Monthly"),
+]
+
+
 def sweep():
     due = db.get_due_reminders()
     for row in due:
         try:
             zulip_notifier.send(row["task"])
-            db.mark_notified(row["id"])
+            recurrence = row["recurrence"]
+            if recurrence and recurrence != "none":
+                remind_at = datetime.fromisoformat(row["remind_at"])
+                if remind_at.tzinfo is None:
+                    remind_at = remind_at.replace(tzinfo=timezone.utc)
+                next_dt = _RECURRENCE_DELTAS[recurrence](remind_at)
+                db.reschedule_reminder(row["id"], next_dt)
+                app.logger.info("Rescheduled (%s): %s -> %s", recurrence, row["task"], next_dt)
+            else:
+                db.mark_notified(row["id"])
             app.logger.info("Notified: %s", row["task"])
         except Exception as exc:
             app.logger.error("Failed to notify for reminder %s: %s", row["id"], exc)
@@ -50,7 +73,13 @@ def index():
     upcoming = db.get_upcoming()
     past = db.get_past()
     zulip_ok = zulip_notifier.is_configured()
-    return render_template("index.html", upcoming=upcoming, past=past, zulip_ok=zulip_ok)
+    return render_template(
+        "index.html",
+        upcoming=upcoming,
+        past=past,
+        zulip_ok=zulip_ok,
+        recurrence_options=RECURRENCE_OPTIONS,
+    )
 
 
 @app.route("/reminders", methods=["POST"])
@@ -84,7 +113,11 @@ def create_reminder():
         flash("That time is in the past. Please choose a future time.", "error")
         return redirect(url_for("index"))
 
-    db.add_reminder(task, parsed_time)
+    recurrence = request.form.get("recurrence", "none")
+    if recurrence not in _RECURRENCE_DELTAS and recurrence != "none":
+        recurrence = "none"
+
+    db.add_reminder(task, parsed_time, recurrence)
     return redirect(url_for("index"))
 
 

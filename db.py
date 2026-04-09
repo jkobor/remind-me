@@ -25,18 +25,24 @@ def init_db():
                 id          TEXT PRIMARY KEY,
                 task        TEXT NOT NULL,
                 remind_at   TEXT NOT NULL,
-                notified_at TEXT
+                notified_at TEXT,
+                recurrence  TEXT NOT NULL DEFAULT 'none'
             )
         """)
+        # migrate existing databases that predate the recurrence column
+        try:
+            conn.execute("ALTER TABLE reminders ADD COLUMN recurrence TEXT NOT NULL DEFAULT 'none'")
+        except Exception:
+            pass
         conn.commit()
 
 
-def add_reminder(task: str, remind_at: datetime) -> str:
+def add_reminder(task: str, remind_at: datetime, recurrence: str = "none") -> str:
     reminder_id = str(uuid.uuid4())
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO reminders (id, task, remind_at) VALUES (?, ?, ?)",
-            (reminder_id, task, remind_at.isoformat()),
+            "INSERT INTO reminders (id, task, remind_at, recurrence) VALUES (?, ?, ?, ?)",
+            (reminder_id, task, remind_at.isoformat(), recurrence),
         )
         conn.commit()
     return reminder_id
@@ -71,6 +77,15 @@ def mark_notified(reminder_id: str):
         conn.execute(
             "UPDATE reminders SET notified_at = ? WHERE id = ?",
             (now, reminder_id),
+        )
+        conn.commit()
+
+
+def reschedule_reminder(reminder_id: str, next_remind_at: datetime):
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE reminders SET remind_at = ?, notified_at = NULL WHERE id = ?",
+            (next_remind_at.isoformat(), reminder_id),
         )
         conn.commit()
 

@@ -19,7 +19,7 @@
     <article class="warning-banner">
       <strong>Zulip not configured.</strong>
       Set <code>ZULIP_EMAIL</code>, <code>ZULIP_API_KEY</code>, <code>ZULIP_SITE</code>,
-      and <code>ZULIP_STREAM</code> environment variables (see <code>.env.example</code>).
+      and <code>ZULIP_TO</code> environment variables (see <code>.env.example</code>).
       Reminders will still be saved but no notifications will be sent.
     </article>
     {% endif %}
@@ -43,6 +43,14 @@
             When?
             <input type="text" name="when" placeholder="in 5 minutes, tomorrow at 9am, next Friday at 3pm" required>
           </label>
+          <label>
+            Repeat
+            <select name="recurrence">
+              {% for value, label in recurrence_options %}
+              <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
         </div>
         <button type="submit">Set Reminder</button>
       </form>
@@ -58,6 +66,7 @@
             <tr>
               <th>Task</th>
               <th>Scheduled for</th>
+              <th>Repeats</th>
               <th></th>
             </tr>
           </thead>
@@ -66,6 +75,13 @@
             <tr id="row-{{ r['id'] }}">
               <td>{{ r['task'] }}</td>
               <td class="time-cell">{{ r['remind_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
+              <td>
+                {% if r['recurrence'] and r['recurrence'] != 'none' %}
+                <span class="recurrence-badge">{{ r['recurrence'] }}</span>
+                {% else %}
+                <span class="muted">once</span>
+                {% endif %}
+              </td>
               <td>
                 <button class="delete-btn outline secondary" data-id="{{ r['id'] }}" title="Delete">&#x2715;</button>
               </td>
@@ -90,6 +106,7 @@
               <th>Task</th>
               <th>Was scheduled for</th>
               <th>Notified at</th>
+              <th>Was repeating</th>
             </tr>
           </thead>
           <tbody>
@@ -98,6 +115,13 @@
               <td>{{ r['task'] }}</td>
               <td class="time-cell">{{ r['remind_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
               <td class="time-cell">{{ r['notified_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
+              <td>
+                {% if r['recurrence'] and r['recurrence'] != 'none' %}
+                <span class="recurrence-badge">{{ r['recurrence'] }}</span>
+                {% else %}
+                <span class="muted">—</span>
+                {% endif %}
+              </td>
             </tr>
             {% endfor %}
           </tbody>
