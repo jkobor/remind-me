@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remind Me</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container">
+
+    <header>
+      <h1>&#x23F0; Remind Me</h1>
+      <p>Create reminders and get notified via Zulip.</p>
+    </header>
+
+    {% if not zulip_ok %}
+    <article class="warning-banner">
+      <strong>Zulip not configured.</strong>
+      Set <code>ZULIP_EMAIL</code>, <code>ZULIP_API_KEY</code>, <code>ZULIP_SITE</code>,
+      and <code>ZULIP_STREAM</code> environment variables (see <code>.env.example</code>).
+      Reminders will still be saved but no notifications will be sent.
+    </article>
+    {% endif %}
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+      <article class="flash-{{ category }}">{{ message }}</article>
+      {% endfor %}
+    {% endwith %}
+
+    <!-- Create form -->
+    <article>
+      <header><strong>New Reminder</strong></header>
+      <form method="POST" action="/reminders">
+        <div class="grid">
+          <label>
+            What should I remind you about?
+            <input type="text" name="task" placeholder="Call mom" required autofocus>
+          </label>
+          <label>
+            When?
+            <input type="text" name="when" placeholder="in 5 minutes, tomorrow at 9am, next Friday at 3pm" required>
+          </label>
+        </div>
+        <button type="submit">Set Reminder</button>
+      </form>
+    </article>
+
+    <!-- Upcoming reminders -->
+    <section>
+      <h2>Upcoming ({{ upcoming | length }})</h2>
+      {% if upcoming %}
+      <figure>
+        <table>
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Scheduled for</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in upcoming %}
+            <tr id="row-{{ r['id'] }}">
+              <td>{{ r['task'] }}</td>
+              <td class="time-cell">{{ r['remind_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
+              <td>
+                <button class="delete-btn outline secondary" data-id="{{ r['id'] }}" title="Delete">&#x2715;</button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </figure>
+      {% else %}
+      <p class="muted">No upcoming reminders. Add one above!</p>
+      {% endif %}
+    </section>
+
+    <!-- Past reminders -->
+    {% if past %}
+    <details>
+      <summary>Past / Notified ({{ past | length }})</summary>
+      <figure>
+        <table>
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Was scheduled for</th>
+              <th>Notified at</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in past %}
+            <tr>
+              <td>{{ r['task'] }}</td>
+              <td class="time-cell">{{ r['remind_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
+              <td class="time-cell">{{ r['notified_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </figure>
+    </details>
+    {% endif %}
+
+  </main>
+
+  <script>
+    document.querySelectorAll('.delete-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.id;
+        const res = await fetch(`/reminders/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          document.getElementById(`row-${id}`).remove();
+          // Update count
+          const section = document.querySelector('section h2');
+          const remaining = document.querySelectorAll('tbody tr').length;
+          section.textContent = `Upcoming (${remaining})`;
+        }
+      });
+    });
+  </script>
+</body>
+</html>

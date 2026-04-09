@@ -1,0 +1,45 @@
+/* Remind Me — custom styles on top of Pico CSS */
+
+header h1 {
+  margin-bottom: 0.25rem;
+}
+
+header p {
+  margin-top: 0;
+  color: var(--pico-muted-color);
+}
+
+.warning-banner {
+  background: var(--pico-color-amber-100, #fff8e1);
+  border-left: 4px solid var(--pico-color-amber-500, #f59e0b);
+  padding: 0.75rem 1rem;
+}
+
+.flash-error {
+  background: var(--pico-color-red-100, #fee2e2);
+  border-left: 4px solid var(--pico-color-red-500, #ef4444);
+  padding: 0.75rem 1rem;
+}
+
+.time-cell {
+  white-space: nowrap;
+  font-size: 0.875rem;
+  color: var(--pico-muted-color);
+}
+
+.muted {
+  color: var(--pico-muted-color);
+}
+
+.delete-btn {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+details summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
