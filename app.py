@@ -104,10 +104,11 @@ def parse_snooze_duration(text: str) -> datetime | None:
 def process_snoozes():
     """Poll Zulip for snooze replies and reschedule queued reminders.
 
-    Each valid ``snooze <duration>`` message is paired with the oldest reminder
-    in the snooze queue (FIFO).  If two reminders fired in the same sweep and
-    the user replies with two snooze commands, each reminder is rescheduled
-    independently.  Extra snooze commands beyond the queue length are ignored.
+    Each ``snooze <token> <duration>`` reply is matched to the queued reminder
+    with that token; multiple reminders can be snoozed independently in one
+    sweep.  Bot-sent message IDs are explicitly excluded from polling so that
+    the bot's own reminder and ack messages are never misread as commands —
+    this is the correct fix for the case where ZULIP_EMAIL == ZULIP_TO.
     """
     if not zulip_notifier.is_configured():
         return
@@ -115,7 +116,13 @@ def process_snoozes():
     anchor_str = db.get_meta("snooze_anchor_id")
     anchor = int(anchor_str) if anchor_str is not None else None
 
-    messages, new_anchor = zulip_notifier.poll_snooze_commands(anchor)
+    # Exclude message IDs the bot itself sent (safe for same-account setups).
+    queue = _snooze_queue_get()
+    bot_msg_ids = frozenset(
+        item["bot_msg_id"] for item in queue if "bot_msg_id" in item
+    )
+
+    messages, new_anchor = zulip_notifier.poll_snooze_commands(anchor, exclude_ids=bot_msg_ids)
 
     if new_anchor is not None:
         db.set_meta("snooze_anchor_id", str(new_anchor))
@@ -123,7 +130,6 @@ def process_snoozes():
     if not messages:
         return
 
-    queue = _snooze_queue_get()
     if not queue:
         return
 
@@ -166,7 +172,7 @@ def sweep():
     for row in due:
         try:
             token = row["id"][:8]
-            zulip_notifier.send(row["task"], token)
+            bot_msg_id = zulip_notifier.send(row["task"], token)
             recurrence = row["recurrence"]
             if recurrence and recurrence != "none":
                 remind_at = datetime.fromisoformat(row["remind_at"])
@@ -181,6 +187,7 @@ def sweep():
             queue.append({
                 "task": row["task"],
                 "token": token,
+                "bot_msg_id": bot_msg_id,
                 "sent_at": datetime.now(timezone.utc).isoformat(),
             })
             _snooze_queue_save(queue)

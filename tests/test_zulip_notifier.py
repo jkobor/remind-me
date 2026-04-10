@@ -53,7 +53,7 @@ class TestSend:
     def test_sends_direct_message_to_configured_user(self, monkeypatch):
         _set_env(monkeypatch)
         mock_client = MagicMock()
-        mock_client.send_message.return_value = {"result": "success"}
+        mock_client.send_message.return_value = {"result": "success", "id": 7}
         with patch("zulip.Client", return_value=mock_client):
             zulip_notifier.send("call mom", "a1b2c3d4")
 
@@ -63,10 +63,18 @@ class TestSend:
         assert ":alarm_clock: **Reminder:** call mom" in call_args["content"]
         assert "a1b2c3d4" in call_args["content"]
 
+    def test_send_returns_message_id(self, monkeypatch):
+        _set_env(monkeypatch)
+        mock_client = MagicMock()
+        mock_client.send_message.return_value = {"result": "success", "id": 123}
+        with patch("zulip.Client", return_value=mock_client):
+            msg_id = zulip_notifier.send("call mom", "a1b2c3d4")
+        assert msg_id == 123
+
     def test_message_content_includes_snooze_token(self, monkeypatch):
         _set_env(monkeypatch)
         mock_client = MagicMock()
-        mock_client.send_message.return_value = {"result": "success"}
+        mock_client.send_message.return_value = {"result": "success", "id": 1}
         with patch("zulip.Client", return_value=mock_client):
             zulip_notifier.send("pick up dry cleaning", "deadbeef")
 
@@ -77,7 +85,7 @@ class TestSend:
     def test_creates_client_with_correct_credentials(self, monkeypatch):
         _set_env(monkeypatch)
         mock_client = MagicMock()
-        mock_client.send_message.return_value = {"result": "success"}
+        mock_client.send_message.return_value = {"result": "success", "id": 1}
         with patch("zulip.Client", return_value=mock_client) as mock_cls:
             zulip_notifier.send("task", "a1b2c3d4")
 
@@ -98,7 +106,7 @@ class TestSend:
     def test_uses_zulip_to_env_var(self, monkeypatch):
         _set_env(monkeypatch, {"ZULIP_TO": "other@example.com"})
         mock_client = MagicMock()
-        mock_client.send_message.return_value = {"result": "success"}
+        mock_client.send_message.return_value = {"result": "success", "id": 1}
         with patch("zulip.Client", return_value=mock_client):
             zulip_notifier.send("task", "a1b2c3d4")
 
@@ -155,19 +163,22 @@ class TestPollSnoozeCommands:
         assert len(msgs) == 2
         assert anchor == 11
 
-    def test_filters_out_bot_messages(self, monkeypatch):
-        """Messages from the bot itself (ZULIP_EMAIL) must be excluded."""
+    def test_excludes_messages_in_exclude_ids(self, monkeypatch):
+        """Messages whose IDs are in exclude_ids are dropped — this is how bot
+        messages are filtered even when ZULIP_EMAIL == ZULIP_TO."""
         _set_env(monkeypatch)
         mock_client = MagicMock()
         mock_client.get_messages.return_value = {
             "result": "success",
             "messages": [
-                {"id": 10, "sender_email": "bot@example.com", "content": "snooze 1h"},
-                {"id": 11, "sender_email": "user@example.com", "content": "snooze 30m"},
+                # id=10 is the bot's own reminder message
+                {"id": 10, "sender_email": "self@example.com", "content": ":alarm_clock: reminder"},
+                # id=11 is the user's snooze reply
+                {"id": 11, "sender_email": "self@example.com", "content": "snooze aaaaaaaa 1h"},
             ],
         }
         with patch("zulip.Client", return_value=mock_client):
-            msgs, anchor = zulip_notifier.poll_snooze_commands(9)
+            msgs, anchor = zulip_notifier.poll_snooze_commands(9, exclude_ids=frozenset({10}))
         assert len(msgs) == 1
         assert msgs[0]["id"] == 11
 
@@ -212,7 +223,7 @@ class TestSendSnoozeAck:
         from datetime import datetime, timezone
         _set_env(monkeypatch)
         mock_client = MagicMock()
-        mock_client.send_message.return_value = {"result": "success"}
+        mock_client.send_message.return_value = {"result": "success", "id": 1}
         dt = datetime(2026, 6, 1, 10, 30, tzinfo=timezone.utc)
         with patch("zulip.Client", return_value=mock_client):
             zulip_notifier.send_snooze_ack("call mom", dt)

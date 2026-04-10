@@ -23,9 +23,14 @@ def _make_client():
     )
 
 
-def send(task: str, snooze_token: str):
-    """Send a reminder DM.  ``snooze_token`` is included so the recipient can
-    reference it when replying ``snooze <token> <duration>``."""
+def send(task: str, snooze_token: str) -> int:
+    """Send a reminder DM and return the Zulip message ID.
+
+    The message ID is stored by the caller so that ``poll_snooze_commands``
+    can explicitly exclude bot-sent messages — which is necessary when
+    ``ZULIP_EMAIL == ZULIP_TO`` (same account), where sender-based filtering
+    cannot distinguish bot messages from user replies.
+    """
     if not is_configured():
         raise RuntimeError(
             "Zulip is not configured. Set ZULIP_EMAIL, ZULIP_API_KEY, "
@@ -40,18 +45,27 @@ def send(task: str, snooze_token: str):
     })
     if result.get("result") != "success":
         raise RuntimeError(f"Zulip send failed: {result}")
+    return result["id"]
 
 
-def poll_snooze_commands(anchor_id: int | None) -> tuple[list[dict], int | None]:
-    """Poll for DMs sent by ZULIP_TO to the bot since ``anchor_id``.
+def poll_snooze_commands(
+    anchor_id: int | None,
+    exclude_ids: frozenset[int] = frozenset(),
+) -> tuple[list[dict], int | None]:
+    """Poll for DMs in the bot↔user conversation since ``anchor_id``.
 
-    If ``anchor_id`` is None this is the first call: fetch the newest message
-    ID to use as the starting anchor, return no commands, and let the caller
-    persist the anchor.  Subsequent calls pass the stored anchor and receive
-    only messages that arrived after it.
+    ``exclude_ids`` must contain the Zulip message IDs of messages sent *by*
+    the bot (returned by :func:`send`).  Excluding them explicitly is the only
+    reliable way to filter out bot messages when ``ZULIP_EMAIL == ZULIP_TO``
+    (same account), where sender-based filtering cannot distinguish the two
+    roles.
+
+    If ``anchor_id`` is None this is the first call: the newest message ID is
+    returned as the starting anchor and no commands are emitted.  Subsequent
+    calls receive only messages that arrived after the stored anchor.
 
     Returns ``(commands, new_anchor_id)``.  On any API failure returns
-    ``([], anchor_id)`` so the sweep can continue safely.
+    ``([], anchor_id)`` so the sweep continues safely.
     """
     if not is_configured():
         return [], anchor_id
@@ -61,7 +75,7 @@ def poll_snooze_commands(anchor_id: int | None) -> tuple[list[dict], int | None]
         user_email = os.environ["ZULIP_TO"]
 
         if anchor_id is None:
-            # Initialise: find the current newest message ID without processing anything.
+            # Initialise: record the current newest message ID without acting on anything.
             result = client.get_messages({
                 "anchor": "newest",
                 "num_before": 0,
@@ -86,10 +100,10 @@ def poll_snooze_commands(anchor_id: int | None) -> tuple[list[dict], int | None]
         messages = result.get("messages", [])
         new_anchor = max((m["id"] for m in messages), default=anchor_id)
 
-        # Only messages from the user (not from the bot) that arrived after anchor.
+        # Exclude the anchor message itself and any message the bot sent.
         commands = [
             m for m in messages
-            if m.get("sender_email") == user_email and m["id"] > anchor_id
+            if m["id"] > anchor_id and m["id"] not in exclude_ids
         ]
         return commands, new_anchor
 

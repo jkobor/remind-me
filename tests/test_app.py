@@ -230,13 +230,15 @@ class TestSweep:
         flask_app.sweep()
         assert mock_zulip_send.call_count == 3
 
-    def test_sweep_appends_task_and_token_to_snooze_queue(self, temp_db, mock_zulip_send):
+    def test_sweep_appends_task_token_and_bot_msg_id_to_queue(self, temp_db, mock_zulip_send):
+        mock_zulip_send.return_value = 99
         rid = db.add_reminder("buy milk", datetime.now(timezone.utc) - timedelta(minutes=1))
         flask_app.sweep()
         queue = json.loads(db.get_meta("snooze_queue"))
         assert len(queue) == 1
         assert queue[0]["task"] == "buy milk"
         assert queue[0]["token"] == rid[:8]
+        assert queue[0]["bot_msg_id"] == 99
 
     def test_sweep_appends_all_notified_tasks_to_queue(self, temp_db, mock_zulip_send):
         earlier = datetime.now(timezone.utc) - timedelta(minutes=2)
@@ -313,17 +315,21 @@ def zulip_configured(monkeypatch):
 def _queue(*entries):
     """Build a snooze_queue JSON value.
 
-    Each entry is either a ``task`` string (token auto-assigned as
-    ``f"{i:08x"}``) or a ``(task, token)`` tuple.
+    Each entry is either a ``task`` string or a ``(task, token)`` tuple or a
+    ``(task, token, bot_msg_id)`` tuple.  Defaults: token = ``f"{i:08x}"``,
+    bot_msg_id = ``1000 + i``.
     """
     now = datetime.now(timezone.utc).isoformat()
     items = []
     for i, entry in enumerate(entries):
-        if isinstance(entry, tuple):
+        if isinstance(entry, tuple) and len(entry) == 3:
+            task, token, bot_msg_id = entry
+        elif isinstance(entry, tuple):
             task, token = entry
+            bot_msg_id = 1000 + i
         else:
-            task, token = entry, f"{i:08x}"
-        items.append({"task": task, "token": token, "sent_at": now})
+            task, token, bot_msg_id = entry, f"{i:08x}", 1000 + i
+        items.append({"task": task, "token": token, "bot_msg_id": bot_msg_id, "sent_at": now})
     return json.dumps(items)
 
 
@@ -340,7 +346,7 @@ class TestProcessSnoozes:
             "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], 99)
         ) as mock_poll:
             flask_app.process_snoozes()
-            mock_poll.assert_called_once_with(None)
+            mock_poll.assert_called_once_with(None, exclude_ids=frozenset())
         assert db.get_meta("snooze_anchor_id") == "99"
 
     def test_passes_stored_anchor_on_subsequent_runs(self, temp_db, zulip_configured, mock_snooze_ack):
@@ -349,7 +355,7 @@ class TestProcessSnoozes:
             "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], 50)
         ) as mock_poll:
             flask_app.process_snoozes()
-            mock_poll.assert_called_once_with(50)
+            mock_poll.assert_called_once_with(50, exclude_ids=frozenset())
 
     def test_creates_reminder_for_valid_snooze(self, temp_db, zulip_configured, mock_snooze_ack):
         db.set_meta("snooze_queue", _queue(("call mom", "aabbccdd")))
@@ -482,3 +488,45 @@ class TestProcessSnoozes:
         assert mock_snooze_ack.call_count == 2
         acked_tasks = {call[0][0] for call in mock_snooze_ack.call_args_list}
         assert acked_tasks == {"call mom", "buy milk"}
+
+    def test_bot_message_ids_excluded_from_poll(self, temp_db, zulip_configured, mock_snooze_ack):
+        """Bot-sent message IDs from the queue are forwarded to poll as exclude_ids.
+
+        This is the fix for ZULIP_EMAIL == ZULIP_TO: even when all messages
+        share the same sender, the bot's own reminders are never treated as
+        snooze commands.
+        """
+        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa", 55)))
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], None)
+        ) as mock_poll:
+            flask_app.process_snoozes()
+
+        _, kwargs = mock_poll.call_args
+        passed_exclude = mock_poll.call_args[0][1] if len(mock_poll.call_args[0]) > 1 else kwargs.get("exclude_ids", frozenset())
+        assert 55 in passed_exclude
+
+    def test_same_account_bot_message_not_processed_as_snooze(
+        self, temp_db, zulip_configured, mock_snooze_ack
+    ):
+        """When ZULIP_EMAIL == ZULIP_TO the bot message ID is excluded so the
+        reminder notification is never mistaken for a snooze command."""
+        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa", 10)))
+        # Simulate the DM thread returning the bot's own reminder message (id=10)
+        # alongside the user's actual snooze reply (id=11).  Only id=11 should
+        # be in commands because id=10 is in exclude_ids.
+        bot_msg = {"id": 10, "sender_email": "self@example.com", "content": "snooze aaaaaaaa 1h"}
+        user_reply = {"id": 11, "sender_email": "self@example.com", "content": "snooze aaaaaaaa 1h"}
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([user_reply], 11)
+        ) as mock_poll:
+            flask_app.process_snoozes()
+
+        # The bot message (id=10) should have been in the exclude set passed to poll.
+        exclude_ids = mock_poll.call_args[0][1] if len(mock_poll.call_args[0]) > 1 else mock_poll.call_args[1].get("exclude_ids", frozenset())
+        assert 10 in exclude_ids
+
+        # The user reply was processed and created a new reminder.
+        upcoming = db.get_upcoming()
+        assert len(upcoming) == 1
+        assert upcoming[0]["task"] == "call mom"
