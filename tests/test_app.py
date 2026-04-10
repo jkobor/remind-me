@@ -144,7 +144,7 @@ class TestSweep:
         mock_zulip_send.assert_called_once()
         args = mock_zulip_send.call_args[0]
         assert args[0] == "one-time"
-        assert len(args[1]) == 8  # snooze token is 8 hex chars
+        assert "/snooze/" in args[1]  # second arg is now a snooze URL
 
     def test_marks_one_time_reminder_as_notified(self, temp_db, mock_zulip_send):
         db.add_reminder("one-time", datetime.now(timezone.utc) - timedelta(minutes=1))
@@ -196,9 +196,7 @@ class TestSweep:
     def test_reschedules_monthly_reminder_by_one_month(self, temp_db, mock_zulip_send):
         from dateutil.relativedelta import relativedelta
         original = datetime(2026, 1, 31, 12, 0, 0, tzinfo=timezone.utc)
-        # Make it "due" by setting remind_at to the past
         rid = db.add_reminder("monthly report", original, recurrence="monthly")
-        # Overwrite remind_at to be in the past so sweep picks it up
         import sqlite3
         conn = sqlite3.connect(str(temp_db))
         past_dt = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
@@ -212,7 +210,6 @@ class TestSweep:
         assert len(upcoming) == 1
 
         new_dt = datetime.fromisoformat(upcoming[0]["remind_at"])
-        # Should be past_dt + 1 month, not original + 1 month
         stored_past = datetime.fromisoformat(past_dt)
         expected = stored_past + relativedelta(months=1)
         assert abs((new_dt - expected).total_seconds()) < 1
@@ -220,7 +217,6 @@ class TestSweep:
     def test_recurring_reminder_stays_upcoming_after_sweep(self, temp_db, mock_zulip_send):
         db.add_reminder("daily", datetime.now(timezone.utc) - timedelta(minutes=1), recurrence="daily")
         flask_app.sweep()
-        # Still in upcoming (rescheduled), not in past
         assert len(db.get_upcoming()) == 1
         assert db.get_past() == []
 
@@ -230,15 +226,13 @@ class TestSweep:
         flask_app.sweep()
         assert mock_zulip_send.call_count == 3
 
-    def test_sweep_appends_task_token_and_bot_msg_id_to_queue(self, temp_db, mock_zulip_send):
-        mock_zulip_send.return_value = 99
+    def test_sweep_appends_task_and_token_to_queue(self, temp_db, mock_zulip_send):
         rid = db.add_reminder("buy milk", datetime.now(timezone.utc) - timedelta(minutes=1))
         flask_app.sweep()
         queue = json.loads(db.get_meta("snooze_queue"))
         assert len(queue) == 1
         assert queue[0]["task"] == "buy milk"
         assert queue[0]["token"] == rid[:8]
-        assert queue[0]["bot_msg_id"] == 99
 
     def test_sweep_appends_all_notified_tasks_to_queue(self, temp_db, mock_zulip_send):
         earlier = datetime.now(timezone.utc) - timedelta(minutes=2)
@@ -250,6 +244,20 @@ class TestSweep:
         tasks = [item["task"] for item in queue]
         assert "first task" in tasks
         assert "second task" in tasks
+
+    def test_snooze_url_contains_token(self, temp_db, mock_zulip_send):
+        rid = db.add_reminder("call mom", datetime.now(timezone.utc) - timedelta(minutes=1))
+        flask_app.sweep()
+        _, snooze_url = mock_zulip_send.call_args[0]
+        assert rid[:8] in snooze_url
+        assert "/snooze/" in snooze_url
+
+    def test_snooze_url_uses_base_url_env(self, temp_db, mock_zulip_send, monkeypatch):
+        monkeypatch.setenv("BASE_URL", "https://remind.example.com")
+        db.add_reminder("standup", datetime.now(timezone.utc) - timedelta(minutes=1))
+        flask_app.sweep()
+        _, snooze_url = mock_zulip_send.call_args[0]
+        assert snooze_url.startswith("https://remind.example.com/snooze/")
 
 
 # ---------------------------------------------------------------------------
@@ -284,249 +292,145 @@ class TestParseSnooze:
 
 
 # ---------------------------------------------------------------------------
-# process_snoozes
+# GET /snooze/<token>
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
-def mock_poll():
-    """Default: no new messages, no anchor change."""
-    with patch("notifiers.zulip_notifier.poll_snooze_commands", return_value=([], None)) as m:
-        yield m
+class TestSnoozeView:
+    def _add_queue_entry(self, task, token):
+        now = datetime.now(timezone.utc).isoformat()
+        db.set_meta("snooze_queue", json.dumps([
+            {"task": task, "token": token, "sent_at": now}
+        ]))
+
+    def test_valid_token_returns_200(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        resp = app_client.get("/snooze/aabbccdd")
+        assert resp.status_code == 200
+
+    def test_shows_task_name(self, app_client):
+        self._add_queue_entry("buy groceries", "aabbccdd")
+        resp = app_client.get("/snooze/aabbccdd")
+        assert b"buy groceries" in resp.data
+
+    def test_shows_preset_durations(self, app_client):
+        self._add_queue_entry("standup", "aabbccdd")
+        resp = app_client.get("/snooze/aabbccdd")
+        assert b"1 hour" in resp.data or b"30 min" in resp.data
+
+    def test_expired_token_returns_404(self, app_client):
+        resp = app_client.get("/snooze/00000000")
+        assert resp.status_code == 404
+
+    def test_expired_token_shows_message(self, app_client):
+        resp = app_client.get("/snooze/00000000")
+        assert b"expired" in resp.data.lower() or b"not found" in resp.data.lower()
+
+    def test_expired_queue_entry_returns_404(self, app_client):
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        db.set_meta("snooze_queue", json.dumps([
+            {"task": "old task", "token": "aabbccdd", "sent_at": old_time}
+        ]))
+        resp = app_client.get("/snooze/aabbccdd")
+        assert resp.status_code == 404
 
 
-@pytest.fixture()
-def mock_snooze_ack():
-    with patch("notifiers.zulip_notifier.send_snooze_ack") as m:
-        yield m
+# ---------------------------------------------------------------------------
+# POST /snooze/<token>
+# ---------------------------------------------------------------------------
 
+class TestSnoozeSubmit:
+    def _add_queue_entry(self, task, token):
+        now = datetime.now(timezone.utc).isoformat()
+        db.set_meta("snooze_queue", json.dumps([
+            {"task": task, "token": token, "sent_at": now}
+        ]))
 
-@pytest.fixture()
-def zulip_configured(monkeypatch):
-    """Set required Zulip env vars so is_configured() returns True."""
-    for k, v in {
-        "ZULIP_EMAIL": "bot@example.com",
-        "ZULIP_API_KEY": "key",
-        "ZULIP_SITE": "https://z.example.com",
-        "ZULIP_TO": "user@example.com",
-    }.items():
-        monkeypatch.setenv(k, v)
-
-
-def _queue(*entries):
-    """Build a snooze_queue JSON value.
-
-    Each entry is either a ``task`` string or a ``(task, token)`` tuple or a
-    ``(task, token, bot_msg_id)`` tuple.  Defaults: token = ``f"{i:08x}"``,
-    bot_msg_id = ``1000 + i``.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    items = []
-    for i, entry in enumerate(entries):
-        if isinstance(entry, tuple) and len(entry) == 3:
-            task, token, bot_msg_id = entry
-        elif isinstance(entry, tuple):
-            task, token = entry
-            bot_msg_id = 1000 + i
-        else:
-            task, token, bot_msg_id = entry, f"{i:08x}", 1000 + i
-        items.append({"task": task, "token": token, "bot_msg_id": bot_msg_id, "sent_at": now})
-    return json.dumps(items)
-
-
-class TestProcessSnoozes:
-    def test_skips_when_zulip_not_configured(self, temp_db, monkeypatch):
-        for k in ("ZULIP_EMAIL", "ZULIP_API_KEY", "ZULIP_SITE", "ZULIP_TO"):
-            monkeypatch.delenv(k, raising=False)
-        with patch("notifiers.zulip_notifier.poll_snooze_commands") as mock_poll:
-            flask_app.process_snoozes()
-            mock_poll.assert_not_called()
-
-    def test_initialises_anchor_on_first_run(self, temp_db, zulip_configured, mock_snooze_ack):
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], 99)
-        ) as mock_poll:
-            flask_app.process_snoozes()
-            mock_poll.assert_called_once_with(None, exclude_ids=frozenset())
-        assert db.get_meta("snooze_anchor_id") == "99"
-
-    def test_passes_stored_anchor_on_subsequent_runs(self, temp_db, zulip_configured, mock_snooze_ack):
-        db.set_meta("snooze_anchor_id", "50")
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], 50)
-        ) as mock_poll:
-            flask_app.process_snoozes()
-            mock_poll.assert_called_once_with(50, exclude_ids=frozenset())
-
-    def test_creates_reminder_for_valid_snooze(self, temp_db, zulip_configured, mock_snooze_ack):
-        db.set_meta("snooze_queue", _queue(("call mom", "aabbccdd")))
-        msg = {"id": 10, "sender_email": "u@e.com", "content": "snooze aabbccdd 1h"}
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
-        ):
-            flask_app.process_snoozes()
-
+    def test_preset_creates_reminder(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        resp = app_client.post("/snooze/aabbccdd", data={"minutes": "60"})
+        assert resp.status_code == 200
         upcoming = db.get_upcoming()
         assert len(upcoming) == 1
         assert upcoming[0]["task"] == "call mom"
-        assert upcoming[0]["recurrence"] == "none"
 
-    def test_two_reminders_snoozed_independently(self, temp_db, zulip_configured, mock_snooze_ack):
-        """Each reminder has its own token; two snooze replies target each one directly."""
-        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa"), ("buy milk", "bbbbbbbb")))
-        messages = [
-            {"id": 10, "sender_email": "u@e.com", "content": "snooze bbbbbbbb 30m"},
-            {"id": 11, "sender_email": "u@e.com", "content": "snooze aaaaaaaa 2h"},
-        ]
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=(messages, 11)
-        ):
-            flask_app.process_snoozes()
-
+    def test_preset_schedules_correct_duration(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        before = datetime.now(timezone.utc)
+        app_client.post("/snooze/aabbccdd", data={"minutes": "30"})
+        after = datetime.now(timezone.utc)
         upcoming = db.get_upcoming()
-        assert len(upcoming) == 2
-        tasks = {r["task"] for r in upcoming}
-        assert tasks == {"call mom", "buy milk"}
+        remind_at = datetime.fromisoformat(upcoming[0]["remind_at"])
+        assert abs((remind_at - before).total_seconds() - 1800) < 5
+        assert remind_at <= after + timedelta(minutes=30, seconds=5)
 
-    def test_snooze_targets_correct_reminder_by_token(
-        self, temp_db, zulip_configured, mock_snooze_ack
-    ):
-        """Token in reply determines which queued reminder is rescheduled."""
-        db.set_meta("snooze_queue", _queue(("task A", "aaaaaaaa"), ("task B", "bbbbbbbb")))
-        # Only snooze task B
-        messages = [{"id": 10, "sender_email": "u@e.com", "content": "snooze bbbbbbbb 1h"}]
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=(messages, 10)
-        ):
-            flask_app.process_snoozes()
+    def test_reminder_set_with_no_recurrence(self, app_client):
+        self._add_queue_entry("task", "aabbccdd")
+        app_client.post("/snooze/aabbccdd", data={"minutes": "60"})
+        assert db.get_upcoming()[0]["recurrence"] == "none"
 
-        upcoming = db.get_upcoming()
-        assert len(upcoming) == 1
-        assert upcoming[0]["task"] == "task B"
+    def test_token_removed_from_queue_after_snooze(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        app_client.post("/snooze/aabbccdd", data={"minutes": "60"})
+        queue = json.loads(db.get_meta("snooze_queue"))
+        assert all(item["token"] != "aabbccdd" for item in queue)
 
-    def test_unknown_token_is_ignored(self, temp_db, zulip_configured, mock_snooze_ack):
-        """A snooze reply with an unrecognised token creates no reminder."""
-        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa")))
-        msg = {"id": 10, "sender_email": "u@e.com", "content": "snooze 99999999 1h"}
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
-        ):
-            flask_app.process_snoozes()
-        assert db.get_upcoming() == []
+    def test_only_snoozed_token_removed_from_queue(self, app_client):
+        now = datetime.now(timezone.utc).isoformat()
+        db.set_meta("snooze_queue", json.dumps([
+            {"task": "task A", "token": "aaaaaaaa", "sent_at": now},
+            {"task": "task B", "token": "bbbbbbbb", "sent_at": now},
+        ]))
+        app_client.post("/snooze/aaaaaaaa", data={"minutes": "60"})
+        queue = json.loads(db.get_meta("snooze_queue"))
+        assert len(queue) == 1
+        assert queue[0]["token"] == "bbbbbbbb"
 
-    def test_unsnoozed_reminder_stays_in_queue(
-        self, temp_db, zulip_configured, mock_snooze_ack
-    ):
-        """A queued reminder that wasn't referenced stays in the queue for later."""
-        db.set_meta("snooze_queue", _queue(("task A", "aaaaaaaa"), ("task B", "bbbbbbbb")))
-        messages = [{"id": 10, "sender_email": "u@e.com", "content": "snooze aaaaaaaa 1h"}]
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=(messages, 10)
-        ):
-            flask_app.process_snoozes()
+    def test_shows_confirmation_page(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        resp = app_client.post("/snooze/aabbccdd", data={"minutes": "60"})
+        assert b"call mom" in resp.data
+        assert b"Snoozed" in resp.data or b"snoozed" in resp.data.lower()
 
-        upcoming = db.get_upcoming()
-        assert len(upcoming) == 1
-        assert upcoming[0]["task"] == "task A"
-
-        remaining = json.loads(db.get_meta("snooze_queue"))
-        assert len(remaining) == 1
-        assert remaining[0]["task"] == "task B"
-
-    def test_duplicate_snooze_for_same_token_ignored(
-        self, temp_db, zulip_configured, mock_snooze_ack
-    ):
-        """Two replies referencing the same token → only one reminder created."""
-        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa")))
-        messages = [
-            {"id": 10, "sender_email": "u@e.com", "content": "snooze aaaaaaaa 30m"},
-            {"id": 11, "sender_email": "u@e.com", "content": "snooze aaaaaaaa 2h"},
-        ]
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=(messages, 11)
-        ):
-            flask_app.process_snoozes()
-
-        assert len(db.get_upcoming()) == 1
-
-    def test_ignores_non_snooze_messages(self, temp_db, zulip_configured, mock_snooze_ack):
-        db.set_meta("snooze_queue", _queue(("task", "aaaaaaaa")))
-        msg = {"id": 10, "sender_email": "u@e.com", "content": "thanks!"}
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
-        ):
-            flask_app.process_snoozes()
-        assert db.get_upcoming() == []
-
-    def test_ignores_unparseable_duration(self, temp_db, zulip_configured, mock_snooze_ack):
-        db.set_meta("snooze_queue", _queue(("task", "aaaaaaaa")))
-        msg = {"id": 10, "sender_email": "u@e.com", "content": "snooze aaaaaaaa banana"}
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
-        ):
-            flask_app.process_snoozes()
-        assert db.get_upcoming() == []
-
-    def test_skips_when_snooze_queue_is_empty(self, temp_db, zulip_configured, mock_snooze_ack):
-        msg = {"id": 10, "sender_email": "u@e.com", "content": "snooze aaaaaaaa 1h"}
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
-        ):
-            flask_app.process_snoozes()
-        assert db.get_upcoming() == []
-
-    def test_sends_ack_per_snoozed_reminder(self, temp_db, zulip_configured, mock_snooze_ack):
-        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa"), ("buy milk", "bbbbbbbb")))
-        messages = [
-            {"id": 10, "sender_email": "u@e.com", "content": "snooze aaaaaaaa 30m"},
-            {"id": 11, "sender_email": "u@e.com", "content": "snooze bbbbbbbb 1h"},
-        ]
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=(messages, 11)
-        ):
-            flask_app.process_snoozes()
-
-        assert mock_snooze_ack.call_count == 2
-        acked_tasks = {call[0][0] for call in mock_snooze_ack.call_args_list}
-        assert acked_tasks == {"call mom", "buy milk"}
-
-    def test_bot_message_ids_excluded_from_poll(self, temp_db, zulip_configured, mock_snooze_ack):
-        """Bot-sent message IDs from the queue are forwarded to poll as exclude_ids.
-
-        This is the fix for ZULIP_EMAIL == ZULIP_TO: even when all messages
-        share the same sender, the bot's own reminders are never treated as
-        snooze commands.
-        """
-        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa", 55)))
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], None)
-        ) as mock_poll:
-            flask_app.process_snoozes()
-
-        _, kwargs = mock_poll.call_args
-        passed_exclude = mock_poll.call_args[0][1] if len(mock_poll.call_args[0]) > 1 else kwargs.get("exclude_ids", frozenset())
-        assert 55 in passed_exclude
-
-    def test_same_account_bot_message_not_processed_as_snooze(
-        self, temp_db, zulip_configured, mock_snooze_ack
-    ):
-        """When ZULIP_EMAIL == ZULIP_TO the bot message ID is excluded so the
-        reminder notification is never mistaken for a snooze command."""
-        db.set_meta("snooze_queue", _queue(("call mom", "aaaaaaaa", 10)))
-        # Simulate the DM thread returning the bot's own reminder message (id=10)
-        # alongside the user's actual snooze reply (id=11).  Only id=11 should
-        # be in commands because id=10 is in exclude_ids.
-        bot_msg = {"id": 10, "sender_email": "self@example.com", "content": "snooze aaaaaaaa 1h"}
-        user_reply = {"id": 11, "sender_email": "self@example.com", "content": "snooze aaaaaaaa 1h"}
-        with patch(
-            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([user_reply], 11)
-        ) as mock_poll:
-            flask_app.process_snoozes()
-
-        # The bot message (id=10) should have been in the exclude set passed to poll.
-        exclude_ids = mock_poll.call_args[0][1] if len(mock_poll.call_args[0]) > 1 else mock_poll.call_args[1].get("exclude_ids", frozenset())
-        assert 10 in exclude_ids
-
-        # The user reply was processed and created a new reminder.
+    def test_custom_duration_creates_reminder(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        resp = app_client.post(
+            "/snooze/aabbccdd",
+            data={"minutes": "custom", "custom_when": "in 2 hours"},
+        )
+        assert resp.status_code == 200
         upcoming = db.get_upcoming()
         assert len(upcoming) == 1
         assert upcoming[0]["task"] == "call mom"
+
+    def test_custom_duration_empty_shows_error(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        resp = app_client.post(
+            "/snooze/aabbccdd",
+            data={"minutes": "custom", "custom_when": ""},
+            follow_redirects=True,
+        )
+        assert db.get_upcoming() == []
+        assert b"enter" in resp.data.lower() or b"custom" in resp.data.lower()
+
+    def test_custom_duration_unparseable_shows_error(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        resp = app_client.post(
+            "/snooze/aabbccdd",
+            data={"minutes": "custom", "custom_when": "notadate!!!"},
+            follow_redirects=True,
+        )
+        assert db.get_upcoming() == []
+        assert b"Could not understand" in resp.data
+
+    def test_missing_minutes_shows_error(self, app_client):
+        self._add_queue_entry("call mom", "aabbccdd")
+        resp = app_client.post(
+            "/snooze/aabbccdd",
+            data={},
+            follow_redirects=True,
+        )
+        assert db.get_upcoming() == []
+
+    def test_expired_token_returns_404(self, app_client):
+        resp = app_client.post("/snooze/00000000", data={"minutes": "60"})
+        assert resp.status_code == 404

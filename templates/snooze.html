@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Snooze Reminder — Remind Me</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container">
+
+    <header>
+      <h1>&#x23F0; Remind Me</h1>
+    </header>
+
+    {% if expired %}
+    <article class="warning-banner">
+      <strong>Snooze link not found or expired.</strong>
+      Snooze links are only valid for 24 hours after a reminder is sent.
+      Visit the <a href="/">main page</a> to manage your reminders.
+    </article>
+    {% else %}
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+      <article class="flash-{{ category }}">{{ message }}</article>
+      {% endfor %}
+    {% endwith %}
+
+    <article>
+      <header><strong>Snooze Reminder</strong></header>
+      <p>How long do you want to snooze: <strong>{{ task }}</strong>?</p>
+
+      <form method="POST" action="{{ url_for('snooze_view', token=token) }}">
+        <div class="snooze-presets">
+          {% for label, minutes in presets %}
+          <button type="submit" name="minutes" value="{{ minutes }}" class="outline">{{ label }}</button>
+          {% endfor %}
+        </div>
+
+        <hr>
+
+        <div class="grid">
+          <label>
+            Custom time
+            <input type="text" name="custom_when"
+                   placeholder="in 3 hours, tomorrow at 9am, next Monday">
+          </label>
+          <div class="snooze-custom-submit">
+            <button type="submit" name="minutes" value="custom">Snooze</button>
+          </div>
+        </div>
+      </form>
+    </article>
+
+    {% endif %}
+
+    <footer><a href="/">&#x2190; Back to Remind Me</a></footer>
+
+  </main>
+</body>
+</html>
