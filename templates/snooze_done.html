@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Snoozed — Remind Me</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container">
+
+    <header>
+      <h1>&#x23F0; Remind Me</h1>
+    </header>
+
+    <article>
+      <header><strong>&#x1F4A4; Snoozed!</strong></header>
+      <p>
+        Got it! I'll remind you about <strong>{{ task }}</strong> again at
+        <code class="time-cell">{{ formatted_time }}</code>.
+      </p>
+      <a href="/" role="button" class="outline">&#x2190; Back to Remind Me</a>
+    </article>
+
+  </main>
+</body>
+</html>
