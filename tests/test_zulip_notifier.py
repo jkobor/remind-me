@@ -48,37 +48,38 @@ class TestSend:
         for k in _REQUIRED_ENV:
             monkeypatch.delenv(k, raising=False)
         with pytest.raises(RuntimeError, match="not configured"):
-            zulip_notifier.send("call mom")
+            zulip_notifier.send("call mom", "a1b2c3d4")
 
     def test_sends_direct_message_to_configured_user(self, monkeypatch):
         _set_env(monkeypatch)
         mock_client = MagicMock()
         mock_client.send_message.return_value = {"result": "success"}
         with patch("zulip.Client", return_value=mock_client):
-            zulip_notifier.send("call mom")
+            zulip_notifier.send("call mom", "a1b2c3d4")
 
         call_args = mock_client.send_message.call_args[0][0]
         assert call_args["type"] == "direct"
         assert call_args["to"] == ["user@example.com"]
         assert ":alarm_clock: **Reminder:** call mom" in call_args["content"]
-        assert "snooze" in call_args["content"]
+        assert "a1b2c3d4" in call_args["content"]
 
-    def test_message_content_includes_task(self, monkeypatch):
+    def test_message_content_includes_snooze_token(self, monkeypatch):
         _set_env(monkeypatch)
         mock_client = MagicMock()
         mock_client.send_message.return_value = {"result": "success"}
         with patch("zulip.Client", return_value=mock_client):
-            zulip_notifier.send("pick up dry cleaning")
+            zulip_notifier.send("pick up dry cleaning", "deadbeef")
 
         content = mock_client.send_message.call_args[0][0]["content"]
         assert "pick up dry cleaning" in content
+        assert "deadbeef" in content
 
     def test_creates_client_with_correct_credentials(self, monkeypatch):
         _set_env(monkeypatch)
         mock_client = MagicMock()
         mock_client.send_message.return_value = {"result": "success"}
         with patch("zulip.Client", return_value=mock_client) as mock_cls:
-            zulip_notifier.send("task")
+            zulip_notifier.send("task", "a1b2c3d4")
 
         mock_cls.assert_called_once_with(
             email="bot@example.com",
@@ -92,14 +93,14 @@ class TestSend:
         mock_client.send_message.return_value = {"result": "error", "msg": "invalid key"}
         with patch("zulip.Client", return_value=mock_client):
             with pytest.raises(RuntimeError, match="Zulip send failed"):
-                zulip_notifier.send("task")
+                zulip_notifier.send("task", "a1b2c3d4")
 
     def test_uses_zulip_to_env_var(self, monkeypatch):
         _set_env(monkeypatch, {"ZULIP_TO": "other@example.com"})
         mock_client = MagicMock()
         mock_client.send_message.return_value = {"result": "success"}
         with patch("zulip.Client", return_value=mock_client):
-            zulip_notifier.send("task")
+            zulip_notifier.send("task", "a1b2c3d4")
 
         call_args = mock_client.send_message.call_args[0][0]
         assert call_args["to"] == ["other@example.com"]

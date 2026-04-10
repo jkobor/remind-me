@@ -2,10 +2,11 @@ import os
 
 _REQUIRED = ("ZULIP_EMAIL", "ZULIP_API_KEY", "ZULIP_SITE", "ZULIP_TO")
 
-_SNOOZE_HINT = (
-    "\n\n*Reply `snooze 1h` (or `snooze 30m`, `snooze tomorrow`) "
-    "to be reminded again after a delay.*"
-)
+def _snooze_hint(token: str) -> str:
+    return (
+        f"\n\n*Snooze ID: `{token}` — reply `snooze {token} 1h` to be reminded "
+        f"again (e.g. `snooze {token} 30m`, `snooze {token} tomorrow`).*"
+    )
 
 
 def is_configured() -> bool:
@@ -22,7 +23,9 @@ def _make_client():
     )
 
 
-def send(task: str):
+def send(task: str, snooze_token: str):
+    """Send a reminder DM.  ``snooze_token`` is included so the recipient can
+    reference it when replying ``snooze <token> <duration>``."""
     if not is_configured():
         raise RuntimeError(
             "Zulip is not configured. Set ZULIP_EMAIL, ZULIP_API_KEY, "
@@ -33,7 +36,7 @@ def send(task: str):
     result = client.send_message({
         "type": "direct",
         "to": [os.environ["ZULIP_TO"]],
-        "content": f":alarm_clock: **Reminder:** {task}{_SNOOZE_HINT}",
+        "content": f":alarm_clock: **Reminder:** {task}{_snooze_hint(snooze_token)}",
     })
     if result.get("result") != "success":
         raise RuntimeError(f"Zulip send failed: {result}")

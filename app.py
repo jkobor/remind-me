@@ -1,4 +1,5 @@
 import atexit
+import json
 import logging
 import os
 import re
@@ -38,8 +39,9 @@ RECURRENCE_OPTIONS = [
     ("monthly", "Monthly"),
 ]
 
-# Pattern matching "snooze <duration>" (case-insensitive).
-_SNOOZE_RE = re.compile(r'^\s*snooze\s+(.+?)\s*$', re.IGNORECASE)
+# Matches "snooze <8-hex-char token> <duration>" (case-insensitive).
+# The token is the first 8 characters of the reminder UUID shown in the DM.
+_SNOOZE_RE = re.compile(r'^\s*snooze\s+([0-9a-f]{8})\s+(.+?)\s*$', re.IGNORECASE)
 
 # Normalise short abbreviations so dateparser can handle them.
 _ABBREV_RE = re.compile(
@@ -52,6 +54,27 @@ _ABBREV_MAP = {
     'd': 'days', 'dy': 'days', 'day': 'days', 'days': 'days',
     'w': 'weeks', 'wk': 'weeks', 'wks': 'weeks',
 }
+
+
+# How long a queued reminder stays eligible for snoozing.
+_SNOOZE_QUEUE_TTL = timedelta(hours=24)
+
+
+def _snooze_queue_get() -> list[dict]:
+    """Load the current snooze queue, dropping entries older than the TTL."""
+    raw = db.get_meta("snooze_queue")
+    if not raw:
+        return []
+    items = json.loads(raw)
+    now = datetime.now(timezone.utc)
+    return [
+        item for item in items
+        if now - datetime.fromisoformat(item["sent_at"]) < _SNOOZE_QUEUE_TTL
+    ]
+
+
+def _snooze_queue_save(items: list[dict]) -> None:
+    db.set_meta("snooze_queue", json.dumps(items))
 
 
 def parse_snooze_duration(text: str) -> datetime | None:
@@ -79,10 +102,12 @@ def parse_snooze_duration(text: str) -> datetime | None:
 
 
 def process_snoozes():
-    """Poll Zulip for snooze replies and reschedule the last-sent reminder.
+    """Poll Zulip for snooze replies and reschedule queued reminders.
 
-    Only the *last* valid snooze command received since the previous sweep is
-    acted upon, so multiple rapid replies don't create duplicate reminders.
+    Each valid ``snooze <duration>`` message is paired with the oldest reminder
+    in the snooze queue (FIFO).  If two reminders fired in the same sweep and
+    the user replies with two snooze commands, each reminder is rescheduled
+    independently.  Extra snooze commands beyond the queue length are ignored.
     """
     if not zulip_notifier.is_configured():
         return
@@ -98,37 +123,50 @@ def process_snoozes():
     if not messages:
         return
 
-    task = db.get_meta("snooze_last_task")
-    if not task:
+    queue = _snooze_queue_get()
+    if not queue:
         return
 
-    # Collect valid snooze targets; act only on the last one.
-    last_target_dt = None
+    # Index queue by token for O(1) lookup.
+    queue_by_token = {item["token"]: item for item in queue}
+    snoozed_tokens: set[str] = set()
+
     for msg in messages:
         content = msg.get("content", "")
         m = _SNOOZE_RE.match(content)
         if not m:
             continue
-        target_dt = parse_snooze_duration(m.group(1))
-        if target_dt is not None:
-            last_target_dt = target_dt
+        token, duration_str = m.group(1).lower(), m.group(2)
+        if token not in queue_by_token:
+            app.logger.debug("Snooze token not found in queue: %s", token)
+            continue
+        if token in snoozed_tokens:
+            app.logger.debug("Duplicate snooze for token %s; ignoring", token)
+            continue
+        target_dt = parse_snooze_duration(duration_str)
+        if target_dt is None:
+            continue
+        item = queue_by_token[token]
+        task = item["task"]
+        db.add_reminder(task, target_dt, recurrence="none")
+        snoozed_tokens.add(token)
+        try:
+            zulip_notifier.send_snooze_ack(task, target_dt)
+        except Exception as exc:
+            app.logger.warning("Could not send snooze ack: %s", exc)
+        app.logger.info("Snoozed '%s' (token %s) until %s", task, token, target_dt)
 
-    if last_target_dt is None:
-        return
-
-    db.add_reminder(task, last_target_dt, recurrence="none")
-    try:
-        zulip_notifier.send_snooze_ack(task, last_target_dt)
-    except Exception as exc:
-        app.logger.warning("Could not send snooze ack: %s", exc)
-    app.logger.info("Snoozed '%s' until %s", task, last_target_dt)
+    # Remove consumed entries from the queue and persist.
+    remaining = [item for item in queue if item["token"] not in snoozed_tokens]
+    _snooze_queue_save(remaining)
 
 
 def sweep():
     due = db.get_due_reminders()
     for row in due:
         try:
-            zulip_notifier.send(row["task"])
+            token = row["id"][:8]
+            zulip_notifier.send(row["task"], token)
             recurrence = row["recurrence"]
             if recurrence and recurrence != "none":
                 remind_at = datetime.fromisoformat(row["remind_at"])
@@ -139,7 +177,13 @@ def sweep():
                 app.logger.info("Rescheduled (%s): %s -> %s", recurrence, row["task"], next_dt)
             else:
                 db.mark_notified(row["id"])
-            db.set_meta("snooze_last_task", row["task"])
+            queue = _snooze_queue_get()
+            queue.append({
+                "task": row["task"],
+                "token": token,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+            })
+            _snooze_queue_save(queue)
             app.logger.info("Notified: %s", row["task"])
         except Exception as exc:
             app.logger.error("Failed to notify for reminder %s: %s", row["id"], exc)
