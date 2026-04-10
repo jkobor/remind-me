@@ -1,6 +1,7 @@
 import atexit
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import dateparser
@@ -37,6 +38,91 @@ RECURRENCE_OPTIONS = [
     ("monthly", "Monthly"),
 ]
 
+# Pattern matching "snooze <duration>" (case-insensitive).
+_SNOOZE_RE = re.compile(r'^\s*snooze\s+(.+?)\s*$', re.IGNORECASE)
+
+# Normalise short abbreviations so dateparser can handle them.
+_ABBREV_RE = re.compile(
+    r'(?<!\w)(\d+)\s*(h|hr|hrs|m|min|mins|d|dy|days?|w|wk|wks)\b',
+    re.IGNORECASE,
+)
+_ABBREV_MAP = {
+    'h': 'hours', 'hr': 'hours', 'hrs': 'hours',
+    'm': 'minutes', 'min': 'minutes', 'mins': 'minutes',
+    'd': 'days', 'dy': 'days', 'day': 'days', 'days': 'days',
+    'w': 'weeks', 'wk': 'weeks', 'wks': 'weeks',
+}
+
+
+def parse_snooze_duration(text: str) -> datetime | None:
+    """Parse a snooze duration string and return an absolute UTC datetime.
+
+    Accepts abbreviations like ``1h``, ``30m``, ``2d`` as well as natural
+    language understood by dateparser (``tomorrow``, ``in 2 hours``, …).
+    Returns None if the text cannot be parsed or resolves to the past.
+    """
+    normalized = _ABBREV_RE.sub(
+        lambda m: f"{m.group(1)} {_ABBREV_MAP[m.group(2).lower()]}",
+        text,
+    )
+    result = dateparser.parse(
+        normalized,
+        settings={
+            "PREFER_DATES_FROM": "future",
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "TO_TIMEZONE": "UTC",
+        },
+    )
+    if result is None or result <= datetime.now(timezone.utc):
+        return None
+    return result
+
+
+def process_snoozes():
+    """Poll Zulip for snooze replies and reschedule the last-sent reminder.
+
+    Only the *last* valid snooze command received since the previous sweep is
+    acted upon, so multiple rapid replies don't create duplicate reminders.
+    """
+    if not zulip_notifier.is_configured():
+        return
+
+    anchor_str = db.get_meta("snooze_anchor_id")
+    anchor = int(anchor_str) if anchor_str is not None else None
+
+    messages, new_anchor = zulip_notifier.poll_snooze_commands(anchor)
+
+    if new_anchor is not None:
+        db.set_meta("snooze_anchor_id", str(new_anchor))
+
+    if not messages:
+        return
+
+    task = db.get_meta("snooze_last_task")
+    if not task:
+        return
+
+    # Collect valid snooze targets; act only on the last one.
+    last_target_dt = None
+    for msg in messages:
+        content = msg.get("content", "")
+        m = _SNOOZE_RE.match(content)
+        if not m:
+            continue
+        target_dt = parse_snooze_duration(m.group(1))
+        if target_dt is not None:
+            last_target_dt = target_dt
+
+    if last_target_dt is None:
+        return
+
+    db.add_reminder(task, last_target_dt, recurrence="none")
+    try:
+        zulip_notifier.send_snooze_ack(task, last_target_dt)
+    except Exception as exc:
+        app.logger.warning("Could not send snooze ack: %s", exc)
+    app.logger.info("Snoozed '%s' until %s", task, last_target_dt)
+
 
 def sweep():
     due = db.get_due_reminders()
@@ -53,9 +139,15 @@ def sweep():
                 app.logger.info("Rescheduled (%s): %s -> %s", recurrence, row["task"], next_dt)
             else:
                 db.mark_notified(row["id"])
+            db.set_meta("snooze_last_task", row["task"])
             app.logger.info("Notified: %s", row["task"])
         except Exception as exc:
             app.logger.error("Failed to notify for reminder %s: %s", row["id"], exc)
+
+    try:
+        process_snoozes()
+    except Exception as exc:
+        app.logger.error("Snooze processing failed: %s", exc)
 
 
 scheduler = BackgroundScheduler(timezone="UTC")

@@ -222,3 +222,27 @@ class TestDeleteReminder:
         upcoming = db.get_upcoming()
         assert len(upcoming) == 1
         assert upcoming[0]["id"] == rid1
+
+
+# ---------------------------------------------------------------------------
+# meta key-value store
+# ---------------------------------------------------------------------------
+
+class TestMeta:
+    def test_get_meta_returns_none_when_missing(self, temp_db):
+        assert db.get_meta("nonexistent_key") is None
+
+    def test_set_and_get_meta_roundtrip(self, temp_db):
+        db.set_meta("my_key", "my_value")
+        assert db.get_meta("my_key") == "my_value"
+
+    def test_set_meta_overwrites_existing(self, temp_db):
+        db.set_meta("k", "first")
+        db.set_meta("k", "second")
+        assert db.get_meta("k") == "second"
+
+    def test_multiple_keys_are_independent(self, temp_db):
+        db.set_meta("a", "1")
+        db.set_meta("b", "2")
+        assert db.get_meta("a") == "1"
+        assert db.get_meta("b") == "2"

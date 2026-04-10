@@ -1,6 +1,6 @@
 """Tests for Flask routes and the sweep background job."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -225,3 +225,171 @@ class TestSweep:
             db.add_reminder(f"task {i}", datetime.now(timezone.utc) - timedelta(minutes=1))
         flask_app.sweep()
         assert mock_zulip_send.call_count == 3
+
+    def test_sweep_stores_last_notified_task_in_meta(self, temp_db, mock_zulip_send):
+        db.add_reminder("buy milk", datetime.now(timezone.utc) - timedelta(minutes=1))
+        flask_app.sweep()
+        assert db.get_meta("snooze_last_task") == "buy milk"
+
+    def test_sweep_stores_last_task_when_multiple_due(self, temp_db, mock_zulip_send):
+        # Add two reminders due at different times; the last one processed wins.
+        earlier = datetime.now(timezone.utc) - timedelta(minutes=2)
+        later = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.add_reminder("first task", earlier)
+        db.add_reminder("second task", later)
+        flask_app.sweep()
+        # Both are processed; snooze_last_task reflects whichever was processed last
+        assert db.get_meta("snooze_last_task") is not None
+
+
+# ---------------------------------------------------------------------------
+# parse_snooze_duration
+# ---------------------------------------------------------------------------
+
+class TestParseSnooze:
+    def test_parses_hour_abbreviation(self):
+        result = flask_app.parse_snooze_duration("1h")
+        assert result is not None
+        expected = datetime.now(timezone.utc) + timedelta(hours=1)
+        assert abs((result - expected).total_seconds()) < 5
+
+    def test_parses_minute_abbreviation(self):
+        result = flask_app.parse_snooze_duration("30m")
+        assert result is not None
+        expected = datetime.now(timezone.utc) + timedelta(minutes=30)
+        assert abs((result - expected).total_seconds()) < 5
+
+    def test_parses_day_abbreviation(self):
+        result = flask_app.parse_snooze_duration("2d")
+        assert result is not None
+        expected = datetime.now(timezone.utc) + timedelta(days=2)
+        assert abs((result - expected).total_seconds()) < 5
+
+    def test_parses_natural_language(self):
+        result = flask_app.parse_snooze_duration("2 hours")
+        assert result is not None
+
+    def test_returns_none_for_garbage(self):
+        assert flask_app.parse_snooze_duration("notadate!!!") is None
+
+
+# ---------------------------------------------------------------------------
+# process_snoozes
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def mock_poll():
+    """Default: no new messages, no anchor change."""
+    with patch("notifiers.zulip_notifier.poll_snooze_commands", return_value=([], None)) as m:
+        yield m
+
+
+@pytest.fixture()
+def mock_snooze_ack():
+    with patch("notifiers.zulip_notifier.send_snooze_ack") as m:
+        yield m
+
+
+@pytest.fixture()
+def zulip_configured(monkeypatch):
+    """Set required Zulip env vars so is_configured() returns True."""
+    for k, v in {
+        "ZULIP_EMAIL": "bot@example.com",
+        "ZULIP_API_KEY": "key",
+        "ZULIP_SITE": "https://z.example.com",
+        "ZULIP_TO": "user@example.com",
+    }.items():
+        monkeypatch.setenv(k, v)
+
+
+class TestProcessSnoozes:
+    def test_skips_when_zulip_not_configured(self, temp_db, monkeypatch):
+        for k in ("ZULIP_EMAIL", "ZULIP_API_KEY", "ZULIP_SITE", "ZULIP_TO"):
+            monkeypatch.delenv(k, raising=False)
+        with patch("notifiers.zulip_notifier.poll_snooze_commands") as mock_poll:
+            flask_app.process_snoozes()
+            mock_poll.assert_not_called()
+
+    def test_initialises_anchor_on_first_run(self, temp_db, zulip_configured, mock_snooze_ack):
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], 99)
+        ) as mock_poll:
+            flask_app.process_snoozes()
+            mock_poll.assert_called_once_with(None)
+        assert db.get_meta("snooze_anchor_id") == "99"
+
+    def test_passes_stored_anchor_on_subsequent_runs(self, temp_db, zulip_configured, mock_snooze_ack):
+        db.set_meta("snooze_anchor_id", "50")
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([], 50)
+        ) as mock_poll:
+            flask_app.process_snoozes()
+            mock_poll.assert_called_once_with(50)
+
+    def test_creates_reminder_for_valid_snooze(self, temp_db, zulip_configured, mock_snooze_ack):
+        db.set_meta("snooze_last_task", "call mom")
+        msg = {"id": 10, "sender_email": "user@example.com", "content": "snooze 1h"}
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
+        ):
+            flask_app.process_snoozes()
+
+        upcoming = db.get_upcoming()
+        assert len(upcoming) == 1
+        assert upcoming[0]["task"] == "call mom"
+        assert upcoming[0]["recurrence"] == "none"
+
+    def test_only_last_snooze_command_is_used(self, temp_db, zulip_configured, mock_snooze_ack):
+        """Multiple snooze replies in one sweep → only the last valid one wins."""
+        db.set_meta("snooze_last_task", "standup")
+        messages = [
+            {"id": 10, "sender_email": "u@e.com", "content": "snooze 30m"},
+            {"id": 11, "sender_email": "u@e.com", "content": "snooze 2h"},
+        ]
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=(messages, 11)
+        ):
+            flask_app.process_snoozes()
+
+        upcoming = db.get_upcoming()
+        assert len(upcoming) == 1  # only one reminder created
+        remind_at = datetime.fromisoformat(upcoming[0]["remind_at"])
+        expected = datetime.now(timezone.utc) + timedelta(hours=2)
+        assert abs((remind_at - expected).total_seconds()) < 5
+
+    def test_ignores_non_snooze_messages(self, temp_db, zulip_configured, mock_snooze_ack):
+        db.set_meta("snooze_last_task", "task")
+        msg = {"id": 10, "sender_email": "u@e.com", "content": "thanks!"}
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
+        ):
+            flask_app.process_snoozes()
+        assert db.get_upcoming() == []
+
+    def test_ignores_unparseable_duration(self, temp_db, zulip_configured, mock_snooze_ack):
+        db.set_meta("snooze_last_task", "task")
+        msg = {"id": 10, "sender_email": "u@e.com", "content": "snooze banana"}
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
+        ):
+            flask_app.process_snoozes()
+        assert db.get_upcoming() == []
+
+    def test_skips_when_no_last_task(self, temp_db, zulip_configured, mock_snooze_ack):
+        msg = {"id": 10, "sender_email": "u@e.com", "content": "snooze 1h"}
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
+        ):
+            flask_app.process_snoozes()
+        assert db.get_upcoming() == []
+
+    def test_sends_ack_after_snooze(self, temp_db, zulip_configured, mock_snooze_ack):
+        db.set_meta("snooze_last_task", "call mom")
+        msg = {"id": 10, "sender_email": "u@e.com", "content": "snooze 1h"}
+        with patch(
+            "notifiers.zulip_notifier.poll_snooze_commands", return_value=([msg], 10)
+        ):
+            flask_app.process_snoozes()
+        mock_snooze_ack.assert_called_once()
+        args = mock_snooze_ack.call_args[0]
+        assert args[0] == "call mom"
