@@ -265,8 +265,7 @@ def snooze_view(token):
 
     app.logger.info("Snoozed '%s' (token %s) until %s via web", task, token, target_dt)
 
-    formatted = target_dt.strftime("%Y-%m-%d %H:%M UTC")
-    return render_template("snooze_done.html", task=task, formatted_time=formatted)
+    return render_template("snooze_done.html", task=task, remind_at_utc=target_dt.isoformat())
 
 
 # ---------------------------------------------------------------------------
