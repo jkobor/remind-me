@@ -39,10 +39,6 @@ RECURRENCE_OPTIONS = [
     ("monthly", "Monthly"),
 ]
 
-# Matches "snooze <8-hex-char token> <duration>" (case-insensitive).
-# The token is the first 8 characters of the reminder UUID shown in the DM.
-_SNOOZE_RE = re.compile(r'^\s*snooze\s+([0-9a-f]{8})\s+(.+?)\s*$', re.IGNORECASE)
-
 # Normalise short abbreviations so dateparser can handle them.
 _ABBREV_RE = re.compile(
     r'(?<!\w)(\d+)\s*(h|hr|hrs|m|min|mins|d|dy|days?|w|wk|wks)\b',
@@ -56,8 +52,19 @@ _ABBREV_MAP = {
 }
 
 
-# How long a queued reminder stays eligible for snoozing.
+# How long a queued reminder stays eligible for snoozing via the web view.
 _SNOOZE_QUEUE_TTL = timedelta(hours=24)
+
+# Preset snooze durations offered in the web view (label → minutes).
+SNOOZE_PRESETS = [
+    ("15 min",   15),
+    ("30 min",   30),
+    ("1 hour",   60),
+    ("2 hours",  120),
+    ("4 hours",  240),
+    ("Tomorrow", 1440),
+    ("Next week", 10080),
+]
 
 
 def _snooze_queue_get() -> list[dict]:
@@ -101,78 +108,14 @@ def parse_snooze_duration(text: str) -> datetime | None:
     return result
 
 
-def process_snoozes():
-    """Poll Zulip for snooze replies and reschedule queued reminders.
-
-    Each ``snooze <token> <duration>`` reply is matched to the queued reminder
-    with that token; multiple reminders can be snoozed independently in one
-    sweep.  Bot-sent message IDs are explicitly excluded from polling so that
-    the bot's own reminder and ack messages are never misread as commands —
-    this is the correct fix for the case where ZULIP_EMAIL == ZULIP_TO.
-    """
-    if not zulip_notifier.is_configured():
-        return
-
-    anchor_str = db.get_meta("snooze_anchor_id")
-    anchor = int(anchor_str) if anchor_str is not None else None
-
-    # Exclude message IDs the bot itself sent (safe for same-account setups).
-    queue = _snooze_queue_get()
-    bot_msg_ids = frozenset(
-        item["bot_msg_id"] for item in queue if "bot_msg_id" in item
-    )
-
-    messages, new_anchor = zulip_notifier.poll_snooze_commands(anchor, exclude_ids=bot_msg_ids)
-
-    if new_anchor is not None:
-        db.set_meta("snooze_anchor_id", str(new_anchor))
-
-    if not messages:
-        return
-
-    if not queue:
-        return
-
-    # Index queue by token for O(1) lookup.
-    queue_by_token = {item["token"]: item for item in queue}
-    snoozed_tokens: set[str] = set()
-
-    for msg in messages:
-        content = msg.get("content", "")
-        m = _SNOOZE_RE.match(content)
-        if not m:
-            continue
-        token, duration_str = m.group(1).lower(), m.group(2)
-        if token not in queue_by_token:
-            app.logger.debug("Snooze token not found in queue: %s", token)
-            continue
-        if token in snoozed_tokens:
-            app.logger.debug("Duplicate snooze for token %s; ignoring", token)
-            continue
-        target_dt = parse_snooze_duration(duration_str)
-        if target_dt is None:
-            continue
-        item = queue_by_token[token]
-        task = item["task"]
-        db.add_reminder(task, target_dt, recurrence="none")
-        snoozed_tokens.add(token)
-        try:
-            zulip_notifier.send_snooze_ack(task, target_dt)
-        except Exception as exc:
-            app.logger.warning("Could not send snooze ack: %s", exc)
-        app.logger.info("Snoozed '%s' (token %s) until %s", task, token, target_dt)
-
-    # Remove consumed entries from the queue and persist.
-    remaining = [item for item in queue if item["token"] not in snoozed_tokens]
-    _snooze_queue_save(remaining)
-
-
 def sweep():
     due = db.get_due_reminders()
+    base_url = os.environ.get("BASE_URL", "http://localhost:5000").rstrip("/")
     for row in due:
         try:
             token = row["id"][:8]
-            bot_msg_id = zulip_notifier.send(row["task"], token)
+            snooze_url = f"{base_url}/snooze/{token}"
+            zulip_notifier.send(row["task"], snooze_url)
             recurrence = row["recurrence"]
             if recurrence and recurrence != "none":
                 remind_at = datetime.fromisoformat(row["remind_at"])
@@ -187,18 +130,12 @@ def sweep():
             queue.append({
                 "task": row["task"],
                 "token": token,
-                "bot_msg_id": bot_msg_id,
                 "sent_at": datetime.now(timezone.utc).isoformat(),
             })
             _snooze_queue_save(queue)
             app.logger.info("Notified: %s", row["task"])
         except Exception as exc:
             app.logger.error("Failed to notify for reminder %s: %s", row["id"], exc)
-
-    try:
-        process_snoozes()
-    except Exception as exc:
-        app.logger.error("Snooze processing failed: %s", exc)
 
 
 scheduler = BackgroundScheduler(timezone="UTC")
@@ -268,6 +205,58 @@ def create_reminder():
 def delete_reminder(reminder_id):
     db.delete_reminder(reminder_id)
     return "", 204
+
+
+@app.route("/snooze/<token>", methods=["GET", "POST"])
+def snooze_view(token):
+    queue = _snooze_queue_get()
+    item = next((i for i in queue if i["token"] == token), None)
+
+    if item is None:
+        return render_template("snooze.html", token=token, task=None, expired=True,
+                               presets=SNOOZE_PRESETS), 404
+
+    task = item["task"]
+
+    if request.method == "GET":
+        return render_template("snooze.html", token=token, task=task, expired=False,
+                               presets=SNOOZE_PRESETS)
+
+    # POST: process the chosen snooze duration.
+    minutes_val = request.form.get("minutes", "").strip()
+    custom_when = request.form.get("custom_when", "").strip()
+
+    if minutes_val == "custom":
+        if not custom_when:
+            flash("Please enter a custom time.", "error")
+            return redirect(url_for("snooze_view", token=token))
+        target_dt = parse_snooze_duration(custom_when)
+        if target_dt is None:
+            flash(
+                f'Could not understand "{custom_when}". '
+                'Try "in 3 hours" or "tomorrow at 9am".',
+                "error",
+            )
+            return redirect(url_for("snooze_view", token=token))
+    else:
+        try:
+            minutes = int(minutes_val)
+            if minutes <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            flash("Please select a snooze duration.", "error")
+            return redirect(url_for("snooze_view", token=token))
+        target_dt = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    db.add_reminder(task, target_dt, recurrence="none")
+
+    remaining = [i for i in queue if i["token"] != token]
+    _snooze_queue_save(remaining)
+
+    app.logger.info("Snoozed '%s' (token %s) until %s via web", task, token, target_dt)
+
+    formatted = target_dt.strftime("%Y-%m-%d %H:%M UTC")
+    return render_template("snooze_done.html", task=task, formatted_time=formatted)
 
 
 # ---------------------------------------------------------------------------
