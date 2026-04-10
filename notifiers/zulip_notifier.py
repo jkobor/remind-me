@@ -116,7 +116,8 @@ def send_snooze_ack(task: str, target_dt) -> None:
     if not is_configured():
         return
     client = _make_client()
-    formatted = target_dt.strftime("%Y-%m-%d %H:%M UTC")
+    local_dt = target_dt.astimezone()
+    formatted = local_dt.strftime("%Y-%m-%d %H:%M %Z")
     client.send_message({
         "type": "direct",
         "to": [os.environ["ZULIP_TO"]],

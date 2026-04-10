@@ -225,13 +225,14 @@ class TestSendSnoozeAck:
         mock_client = MagicMock()
         mock_client.send_message.return_value = {"result": "success", "id": 1}
         dt = datetime(2026, 6, 1, 10, 30, tzinfo=timezone.utc)
+        expected_time = dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
         with patch("zulip.Client", return_value=mock_client):
             zulip_notifier.send_snooze_ack("call mom", dt)
         call_args = mock_client.send_message.call_args[0][0]
         assert call_args["type"] == "direct"
         assert call_args["to"] == ["user@example.com"]
         assert "call mom" in call_args["content"]
-        assert "2026-06-01 10:30 UTC" in call_args["content"]
+        assert expected_time in call_args["content"]
 
     def test_does_nothing_when_not_configured(self, monkeypatch):
         from datetime import datetime, timezone
