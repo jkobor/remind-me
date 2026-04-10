@@ -27,16 +27,26 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 
 _RECURRENCE_DELTAS = {
-    "daily":   lambda dt: dt + timedelta(days=1),
-    "weekly":  lambda dt: dt + timedelta(weeks=1),
-    "monthly": lambda dt: dt + relativedelta(months=1),
+    "hourly":      lambda dt: dt + timedelta(hours=1),
+    "daily":       lambda dt: dt + timedelta(days=1),
+    "every2days":  lambda dt: dt + timedelta(days=2),
+    "weekly":      lambda dt: dt + timedelta(weeks=1),
+    "biweekly":    lambda dt: dt + timedelta(weeks=2),
+    "monthly":     lambda dt: dt + relativedelta(months=1),
+    "quarterly":   lambda dt: dt + relativedelta(months=3),
+    "yearly":      lambda dt: dt + relativedelta(years=1),
 }
 
 RECURRENCE_OPTIONS = [
-    ("none",    "Once"),
-    ("daily",   "Daily"),
-    ("weekly",  "Weekly"),
-    ("monthly", "Monthly"),
+    ("none",       "Once"),
+    ("hourly",     "Hourly"),
+    ("daily",      "Daily"),
+    ("every2days", "Every 2 Days"),
+    ("weekly",     "Weekly"),
+    ("biweekly",   "Every 2 Weeks"),
+    ("monthly",    "Monthly"),
+    ("quarterly",  "Quarterly"),
+    ("yearly",     "Yearly"),
 ]
 
 # Matches "snooze <8-hex-char token> <duration>" (case-insensitive).

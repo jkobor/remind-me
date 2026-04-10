@@ -93,7 +93,9 @@ class TestCreateReminder:
         )
         assert db.get_upcoming()[0]["recurrence"] == "daily"
 
-    @pytest.mark.parametrize("recurrence", ["daily", "weekly", "monthly"])
+    @pytest.mark.parametrize("recurrence", [
+        "hourly", "daily", "every2days", "weekly", "biweekly", "monthly", "quarterly", "yearly",
+    ])
     def test_all_valid_recurrences_accepted(self, app_client, recurrence):
         app_client.post(
             "/reminders",
@@ -104,7 +106,7 @@ class TestCreateReminder:
     def test_invalid_recurrence_falls_back_to_none(self, app_client):
         app_client.post(
             "/reminders",
-            data={"task": "task", "when": "in 1 hour", "recurrence": "hourly"},
+            data={"task": "task", "when": "in 1 hour", "recurrence": "fortnightly"},
         )
         assert db.get_upcoming()[0]["recurrence"] == "none"
 
