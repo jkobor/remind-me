@@ -18,11 +18,26 @@
       <header><strong>&#x1F4A4; Snoozed!</strong></header>
       <p>
         Got it! I'll remind you about <strong>{{ task }}</strong> again at
-        <code class="time-cell">{{ formatted_time }}</code>.
+        <code class="time-cell" data-utc="{{ remind_at_utc }}">{{ remind_at_utc }}</code>.
       </p>
       <a href="/" role="button" class="outline">&#x2190; Back to Remind Me</a>
     </article>
 
   </main>
+
+  <script>
+    document.querySelectorAll('[data-utc]').forEach(cell => {
+      const utc = cell.dataset.utc;
+      if (!utc) return;
+      const date = new Date(utc);
+      const parts = new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+        timeZoneName: 'short'
+      }).formatToParts(date);
+      const get = type => parts.find(p => p.type === type)?.value ?? '';
+      cell.textContent = `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} ${get('timeZoneName')}`;
+    });
+  </script>
 </body>
 </html>
