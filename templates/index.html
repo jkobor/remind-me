@@ -74,7 +74,7 @@
             {% for r in upcoming %}
             <tr id="row-{{ r['id'] }}">
               <td>{{ r['task'] }}</td>
-              <td class="time-cell">{{ r['remind_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
+              <td class="time-cell" data-utc="{{ r['remind_at'] }}"></td>
               <td>
                 {% if r['recurrence'] and r['recurrence'] != 'none' %}
                 <span class="recurrence-badge">{{ r['recurrence'] }}</span>
@@ -113,8 +113,8 @@
             {% for r in past %}
             <tr>
               <td>{{ r['task'] }}</td>
-              <td class="time-cell">{{ r['remind_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
-              <td class="time-cell">{{ r['notified_at'] | replace('T', ' ') | truncate(16, True, '') }} UTC</td>
+              <td class="time-cell" data-utc="{{ r['remind_at'] }}"></td>
+              <td class="time-cell" data-utc="{{ r['notified_at'] }}"></td>
               <td>
                 {% if r['recurrence'] and r['recurrence'] != 'none' %}
                 <span class="recurrence-badge">{{ r['recurrence'] }}</span>
@@ -133,6 +133,19 @@
   </main>
 
   <script>
+    document.querySelectorAll('[data-utc]').forEach(cell => {
+      const utc = cell.dataset.utc;
+      if (!utc) return;
+      const date = new Date(utc);
+      const parts = new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+        timeZoneName: 'short'
+      }).formatToParts(date);
+      const get = type => parts.find(p => p.type === type)?.value ?? '';
+      cell.textContent = `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} ${get('timeZoneName')}`;
+    });
+
     document.querySelectorAll('.delete-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.id;
