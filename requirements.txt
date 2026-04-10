@@ -1,5 +1,0 @@
-flask>=3.0
-apscheduler>=3.10
-dateparser>=1.2
-zulip>=0.9
-python-dotenv>=1.0
