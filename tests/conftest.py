@@ -34,6 +34,10 @@ def app_client(temp_db, monkeypatch):
 
 @pytest.fixture()
 def mock_zulip_send():
-    """Prevent real Zulip calls in sweep tests."""
-    with patch("notifiers.zulip_notifier.send") as mock:
+    """Prevent real Zulip calls in sweep tests.
+
+    Returns a fake Zulip message ID (42) so callers that store the return
+    value (e.g. sweep() → bot_msg_id) receive a valid integer.
+    """
+    with patch("notifiers.zulip_notifier.send", return_value=42) as mock:
         yield mock
