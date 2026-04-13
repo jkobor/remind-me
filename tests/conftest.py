@@ -15,6 +15,17 @@ import db as db_module
 import app as flask_app  # noqa: E402 – imported after the scheduler patch
 
 
+# Reusable test-user constants so tests and fixtures share the same identity.
+TEST_USERNAME = "testuser"
+TEST_USER_EMAIL = "testuser@example.com"
+TEST_USER_DISPLAY = "Test User"
+TEST_USER = {
+    "username": TEST_USERNAME,
+    "email": TEST_USER_EMAIL,
+    "display_name": TEST_USER_DISPLAY,
+}
+
+
 @pytest.fixture()
 def temp_db(tmp_path, monkeypatch):
     """Point DATABASE_PATH at a fresh temp SQLite file and initialise the schema."""
@@ -25,10 +36,23 @@ def temp_db(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def app_client(temp_db, monkeypatch):
-    """Flask test client backed by a fresh temp database."""
+    """Flask test client backed by a fresh temp database (no session)."""
     monkeypatch.setenv("SECRET_KEY", "test-secret")
     flask_app.app.config["TESTING"] = True
     with flask_app.app.test_client() as client:
+        yield client
+
+
+@pytest.fixture()
+def logged_in_client(temp_db, monkeypatch):
+    """Flask test client with TEST_USER already in session."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    flask_app.app.config["TESTING"] = True
+    with flask_app.app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["username"] = TEST_USERNAME
+            sess["email"] = TEST_USER_EMAIL
+            sess["display_name"] = TEST_USER_DISPLAY
         yield client
 
 

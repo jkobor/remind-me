@@ -30,7 +30,8 @@ class TestInitDb:
         conn = sqlite3.connect(str(temp_db))
         cols = {r[1] for r in conn.execute("PRAGMA table_info(reminders)")}
         conn.close()
-        assert cols == {"id", "task", "remind_at", "notified_at", "recurrence"}
+        assert cols == {"id", "task", "remind_at", "notified_at", "recurrence",
+                        "user_id", "user_email"}
 
     def test_migration_adds_recurrence_to_old_schema(self, temp_db):
         """A DB created before the recurrence column exists should be migrated."""
@@ -47,12 +48,12 @@ class TestInitDb:
         conn.commit()
         conn.close()
 
-        db.init_db()  # should add the column without raising
+        db.init_db()  # should add all missing columns without raising
 
         conn = sqlite3.connect(str(temp_db))
         cols = {r[1] for r in conn.execute("PRAGMA table_info(reminders)")}
         conn.close()
-        assert "recurrence" in cols
+        assert {"recurrence", "user_id", "user_email"}.issubset(cols)
 
     def test_idempotent(self, temp_db):
         """Calling init_db twice must not raise."""
@@ -70,7 +71,7 @@ class TestAddReminder:
         assert rid.count("-") == 4
 
     def test_default_recurrence_is_none(self, temp_db):
-        rid = db.add_reminder("task", _future())
+        db.add_reminder("task", _future())
         row = db.get_upcoming()[0]
         assert row["recurrence"] == "none"
 
@@ -88,6 +89,18 @@ class TestAddReminder:
         db.add_reminder("task", dt)
         stored = db.get_upcoming()[0]["remind_at"]
         assert stored == dt.isoformat()
+
+    def test_user_id_stored(self, temp_db):
+        db.add_reminder("task", _future(), user_id="alice")
+        assert db.get_upcoming()[0]["user_id"] == "alice"
+
+    def test_user_email_stored(self, temp_db):
+        db.add_reminder("task", _future(), user_email="alice@example.com")
+        assert db.get_upcoming()[0]["user_email"] == "alice@example.com"
+
+    def test_default_user_id_is_empty(self, temp_db):
+        db.add_reminder("task", _future())
+        assert db.get_upcoming()[0]["user_id"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +127,18 @@ class TestGetUpcoming:
     def test_empty_when_no_reminders(self, temp_db):
         assert db.get_upcoming() == []
 
+    def test_filters_by_user_id(self, temp_db):
+        db.add_reminder("alice task", _future(), user_id="alice")
+        db.add_reminder("bob task", _future(), user_id="bob")
+        alice_rows = db.get_upcoming("alice")
+        assert len(alice_rows) == 1
+        assert alice_rows[0]["task"] == "alice task"
+
+    def test_no_user_id_returns_all(self, temp_db):
+        db.add_reminder("alice task", _future(), user_id="alice")
+        db.add_reminder("bob task", _future(), user_id="bob")
+        assert len(db.get_upcoming()) == 2
+
 
 # ---------------------------------------------------------------------------
 # get_past
@@ -133,6 +158,15 @@ class TestGetPast:
 
     def test_empty_when_no_reminders(self, temp_db):
         assert db.get_past() == []
+
+    def test_filters_by_user_id(self, temp_db):
+        rid_a = db.add_reminder("alice done", _future(), user_id="alice")
+        rid_b = db.add_reminder("bob done", _future(), user_id="bob")
+        db.mark_notified(rid_a)
+        db.mark_notified(rid_b)
+        alice_past = db.get_past("alice")
+        assert len(alice_past) == 1
+        assert alice_past[0]["task"] == "alice done"
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +189,11 @@ class TestGetDueReminders:
 
     def test_empty_when_no_reminders(self, temp_db):
         assert db.get_due_reminders() == []
+
+    def test_returns_due_for_all_users(self, temp_db):
+        db.add_reminder("alice", _past(), user_id="alice")
+        db.add_reminder("bob", _past(), user_id="bob")
+        assert len(db.get_due_reminders()) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +261,16 @@ class TestDeleteReminder:
         upcoming = db.get_upcoming()
         assert len(upcoming) == 1
         assert upcoming[0]["id"] == rid1
+
+    def test_scoped_delete_removes_matching_user(self, temp_db):
+        rid = db.add_reminder("task", _future(), user_id="alice")
+        db.delete_reminder(rid, user_id="alice")
+        assert db.get_upcoming("alice") == []
+
+    def test_scoped_delete_ignores_other_user(self, temp_db):
+        rid = db.add_reminder("task", _future(), user_id="alice")
+        db.delete_reminder(rid, user_id="bob")
+        assert len(db.get_upcoming("alice")) == 1
 
 
 # ---------------------------------------------------------------------------

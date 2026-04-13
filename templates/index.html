@@ -10,9 +10,22 @@
 <body>
   <main class="container">
 
-    <header>
-      <h1>&#x23F0; Remind Me</h1>
-      <p>Create reminders and get notified via Zulip.</p>
+    <header style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+      <div>
+        <h1 style="margin-bottom: 0.25rem;">&#x23F0; Remind Me</h1>
+        <p style="margin: 0;">Create reminders and get notified via Zulip.</p>
+      </div>
+      <div style="display: flex; align-items: center; gap: 1rem;">
+        <span class="muted" style="font-size: 0.9rem;">
+          Signed in as <strong>{{ current_user.display_name }}</strong>
+          ({{ current_user.username }})
+        </span>
+        <form method="POST" action="{{ url_for('logout') }}" style="margin: 0;">
+          <button type="submit" class="outline secondary" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;">
+            Sign Out
+          </button>
+        </form>
+      </div>
     </header>
 
     {% if not zulip_ok %}

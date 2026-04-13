@@ -9,8 +9,17 @@ import dateparser
 from apscheduler.schedulers.background import BackgroundScheduler
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    flash,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 
+import auth
 import db
 from notifiers import zulip_notifier
 
@@ -125,7 +134,10 @@ def sweep():
         try:
             token = row["id"][:8]
             snooze_url = f"{base_url}/snooze/{token}"
-            zulip_notifier.send(row["task"], snooze_url)
+            # Use the per-user email stored on the reminder; fall back to
+            # the global ZULIP_TO for legacy / single-user setups.
+            user_email = row["user_email"] or None
+            zulip_notifier.send(row["task"], snooze_url, to_email=user_email)
             recurrence = row["recurrence"]
             if recurrence and recurrence != "none":
                 remind_at = datetime.fromisoformat(row["remind_at"])
@@ -138,9 +150,11 @@ def sweep():
                 db.mark_notified(row["id"])
             queue = _snooze_queue_get()
             queue.append({
-                "task": row["task"],
-                "token": token,
-                "sent_at": datetime.now(timezone.utc).isoformat(),
+                "task":       row["task"],
+                "token":      token,
+                "sent_at":    datetime.now(timezone.utc).isoformat(),
+                "user_id":    row["user_id"],
+                "user_email": row["user_email"],
             })
             _snooze_queue_save(queue)
             app.logger.info("Notified: %s", row["task"])
@@ -155,13 +169,53 @@ atexit.register(scheduler.shutdown)
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Authentication routes
+# ---------------------------------------------------------------------------
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if "username" in session:
+        return redirect(url_for("index"))
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+
+        if not username or not password:
+            flash("Please enter your username and password.", "error")
+            return render_template("login.html", ldap_configured=auth.is_configured())
+
+        user = auth.authenticate(username, password)
+        if user is None:
+            flash("Invalid credentials. Please try again.", "error")
+            return render_template("login.html", ldap_configured=auth.is_configured())
+
+        session["username"] = user["username"]
+        session["email"] = user["email"]
+        session["display_name"] = user["display_name"]
+
+        next_url = request.args.get("next") or url_for("index")
+        return redirect(next_url)
+
+    return render_template("login.html", ldap_configured=auth.is_configured())
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
+# Application routes
 # ---------------------------------------------------------------------------
 
 @app.route("/")
+@auth.login_required
 def index():
-    upcoming = db.get_upcoming()
-    past = db.get_past()
+    user = auth.current_user()
+    upcoming = db.get_upcoming(user["username"])
+    past = db.get_past(user["username"])
     zulip_ok = zulip_notifier.is_configured()
     return render_template(
         "index.html",
@@ -169,11 +223,14 @@ def index():
         past=past,
         zulip_ok=zulip_ok,
         recurrence_options=RECURRENCE_OPTIONS,
+        current_user=user,
     )
 
 
 @app.route("/reminders", methods=["POST"])
+@auth.login_required
 def create_reminder():
+    user = auth.current_user()
     task = request.form.get("task", "").strip()
     when_str = request.form.get("when", "").strip()
 
@@ -207,18 +264,28 @@ def create_reminder():
     if recurrence not in _RECURRENCE_DELTAS and recurrence != "none":
         recurrence = "none"
 
-    db.add_reminder(task, parsed_time, recurrence)
+    db.add_reminder(
+        task,
+        parsed_time,
+        recurrence,
+        user_id=user["username"],
+        user_email=user["email"],
+    )
     return redirect(url_for("index"))
 
 
 @app.route("/reminders/<reminder_id>", methods=["DELETE"])
+@auth.login_required
 def delete_reminder(reminder_id):
-    db.delete_reminder(reminder_id)
+    user = auth.current_user()
+    db.delete_reminder(reminder_id, user_id=user["username"])
     return "", 204
 
 
 @app.route("/snooze/<token>", methods=["GET", "POST"])
 def snooze_view(token):
+    # Snooze links are delivered via Zulip and must be accessible without
+    # an active login session.
     queue = _snooze_queue_get()
     item = next((i for i in queue if i["token"] == token), None)
 
@@ -258,7 +325,14 @@ def snooze_view(token):
             return redirect(url_for("snooze_view", token=token))
         target_dt = datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
-    db.add_reminder(task, target_dt, recurrence="none")
+    # Re-create the reminder for the same user who originally set it.
+    db.add_reminder(
+        task,
+        target_dt,
+        recurrence="none",
+        user_id=item.get("user_id", ""),
+        user_email=item.get("user_email", ""),
+    )
 
     remaining = [i for i in queue if i["token"] != token]
     _snooze_queue_save(remaining)
