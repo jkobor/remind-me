@@ -131,7 +131,10 @@ def sweep():
                 remind_at = datetime.fromisoformat(row["remind_at"])
                 if remind_at.tzinfo is None:
                     remind_at = remind_at.replace(tzinfo=timezone.utc)
-                next_dt = _RECURRENCE_DELTAS[recurrence](remind_at)
+                now = datetime.now(timezone.utc)
+                next_dt = remind_at
+                while next_dt <= now:  # skip all missed occurrences
+                    next_dt = _RECURRENCE_DELTAS[recurrence](next_dt)
                 db.reschedule_reminder(row["id"], next_dt)
                 app.logger.info("Rescheduled (%s): %s -> %s", recurrence, row["task"], next_dt)
             else:
