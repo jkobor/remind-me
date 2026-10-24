@@ -1,4 +1,5 @@
 import atexit
+import hmac
 import json
 import logging
 import os
@@ -9,7 +10,7 @@ import dateparser
 from apscheduler.schedulers.background import BackgroundScheduler
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import Flask, flash, redirect, render_template, request, session, url_for
 
 import db
 from notifiers import zulip_notifier
@@ -155,6 +156,57 @@ scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(sweep, "interval", seconds=60)
 scheduler.start()
 atexit.register(scheduler.shutdown)
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+def auth_enabled() -> bool:
+    """Password auth is active when APP_PASSWORD is set."""
+    return bool(os.environ.get("APP_PASSWORD"))
+
+
+@app.context_processor
+def inject_auth():
+    return {"auth_enabled": auth_enabled()}
+
+
+@app.before_request
+def require_login():
+    if not auth_enabled():
+        return None
+    # Snooze links carry a secret token and are opened from Zulip (often on
+    # mobile), so they stay exempt from the login wall.
+    if request.endpoint in ("login", "logout", "static", "snooze_view"):
+        return None
+    if session.get("authenticated"):
+        return None
+    return redirect(url_for("login", next=request.path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not auth_enabled():
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        password = os.environ.get("APP_PASSWORD", "")
+        supplied = request.form.get("password", "")
+        if hmac.compare_digest(supplied.encode(), password.encode()):
+            session["authenticated"] = True
+            next_url = request.args.get("next") or url_for("index")
+            # Only allow relative redirects to avoid open-redirect abuse.
+            if not next_url.startswith("/") or next_url.startswith("//"):
+                next_url = url_for("index")
+            return redirect(next_url)
+        flash("Incorrect password.", "error")
+    return render_template("login.html")
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.pop("authenticated", None)
+    return redirect(url_for("index"))
 
 
 # ---------------------------------------------------------------------------

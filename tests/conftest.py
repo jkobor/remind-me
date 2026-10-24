@@ -27,6 +27,7 @@ def temp_db(tmp_path, monkeypatch):
 def app_client(temp_db, monkeypatch):
     """Flask test client backed by a fresh temp database."""
     monkeypatch.setenv("SECRET_KEY", "test-secret")
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
     flask_app.app.config["TESTING"] = True
     with flask_app.app.test_client() as client:
         yield client

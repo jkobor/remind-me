@@ -12,7 +12,13 @@
 
     <header>
       <h1>&#x23F0; Remind Me</h1>
-      <p>Create reminders and get notified via Zulip.</p>
+      <p>Create reminders and get notified via Zulip.
+        {% if auth_enabled %}
+        <form method="POST" action="{{ url_for('logout') }}" style="display:inline">
+          <button type="submit" class="outline secondary" style="padding:0.1rem 0.5rem;font-size:0.8em">Log out</button>
+        </form>
+        {% endif %}
+      </p>
     </header>
 
     {% if not zulip_ok %}
